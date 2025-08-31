@@ -8,8 +8,8 @@ import sys
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Any, Union
 
-from util.market_data_handler import MarketDataHandler
-from strategy.b1_strategy import B1Strategy, ConditionType
+from ..util.market_data_handler import MarketDataHandler
+from ..strategy.b1_strategy import B1Strategy, ConditionType
 
 class B1StockFilter:
     """
@@ -396,7 +396,7 @@ if __name__ == "__main__":
 
 
 # 示例用法:
-# python b1_stock_filter.py --date 2025-08-01 --strategy weighted --stock_pool hs300  # 使用沪深300全部股票
-# python b1_stock_filter.py --date 2025-08-01 --strategy default --stock_pool all_a --stock_count 100  # 从全部A股中随机选取100只
-# python b1_stock_filter.py --date 2025-08-01 --strategy default --stock_pool main  # 使用全部沪深主板股票
-# python b1_stock_filter.py --date 2025-08-01 --strategy default --stock_count -1  # -1表示使用全部股票（不截取）
+# python filter/b1_stock_filter.py --date 2025-08-01 --strategy weighted --stock_pool hs300  # 使用沪深300全部股票
+# python filter/b1_stock_filter.py --date 2025-08-01 --strategy default --stock_pool all_a --stock_count 100  # 从全部A股中随机选取100只
+# python filter/b1_stock_filter.py --date 2025-08-01 --strategy default --stock_pool main  # 使用全部沪深主板股票
+# python filter/b1_stock_filter.py --date 2025-08-01 --strategy default --stock_count -1  # -1表示使用全部股票（不截取）

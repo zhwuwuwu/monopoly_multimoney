@@ -18,7 +18,7 @@ plt.rcParams['axes.unicode_minus'] = False    # 解决负号显示问题
 # 导入自定义模块
 from util.market_data_handler import MarketDataHandler
 from strategy.b1_strategy import B1Strategy, ConditionType
-from b1_stock_filter import B1StockFilter, configure_strategy_variant
+from filter.b1_stock_filter import B1StockFilter, configure_strategy_variant
 
 class StrategyVariationTester:
     """
