@@ -6,6 +6,7 @@ import numpy as np
 import akshare as ak
 import os
 import argparse
+import sys
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Any, Union
 
@@ -15,24 +16,24 @@ from ..util.market_data_handler import MarketDataHandler
 class IndexContributionFilter:
     """
     指数贡献选股策略类
-    用于获取各板块的权重股并筛选KDJ<15的股票
+    用于获取各个板块的权重股，并筛选出KDJ<15的股票
     """
     
     def __init__(self, 
                  data_handler: Optional[MarketDataHandler] = None,
-                 history_days: int = 60,
+                 history_days: int = 45,
                  verbose: bool = True):
         """
         初始化指数贡献筛选器
         :param data_handler: 市场数据处理器实例，如果为None则创建新实例
-        :param history_days: 获取历史数据的天数，默认60天
+        :param history_days: 获取历史数据的天数，默认45天
         :param verbose: 是否打印详细信息
         """
         self.data_handler = data_handler if data_handler else MarketDataHandler()
         self.history_days = history_days
         self.verbose = verbose
-        self.sector_data = {}  # 缓存板块数据
-        self.stock_data = {}   # 缓存股票数据
+        self.sectors_data = {}  # 缓存板块数据
+        self.stock_data_dict = {}  # 缓存股票数据
         
     def _disable_proxies(self):
         """临时禁用代理设置"""
@@ -56,423 +57,450 @@ class IndexContributionFilter:
     def get_all_sectors(self) -> Dict[str, List[Dict]]:
         """
         获取沪深市场所有板块列表
-        :return: 板块字典 {'sector_name': [{'code': 'xxx', 'name': 'xxx'}, ...]}
+        :return: 板块数据字典 {sector_type: [sector_info]}
         """
         original_http_proxy, original_https_proxy = self._disable_proxies()
         
         try:
-            if self.verbose:
-                print("正在获取所有板块信息...")
+            all_sectors = {}
             
-            sectors = {}
+            if self.verbose:
+                print("正在获取板块信息...")
             
             # 获取概念板块
-            if self.verbose:
-                print("获取概念板块...")
             try:
                 concept_df = ak.stock_board_concept_name_em()
-                if not concept_df.empty:
-                    sectors['概念板块'] = [
-                        {'code': row['板块代码'], 'name': row['板块名称']} 
-                        for _, row in concept_df.iterrows()
-                    ]
-                    if self.verbose:
-                        print(f"获取到 {len(sectors['概念板块'])} 个概念板块")
+                concept_list = []
+                for _, row in concept_df.iterrows():
+                    concept_list.append({
+                        'code': row['板块代码'],
+                        'name': row['板块名称'],
+                        'stock_count': row.get('成分股数量', 0),
+                        'type': '概念板块'
+                    })
+                all_sectors['concept'] = concept_list
+                if self.verbose:
+                    print(f"获取概念板块 {len(concept_list)} 个")
             except Exception as e:
                 if self.verbose:
                     print(f"获取概念板块失败: {e}")
-                sectors['概念板块'] = []
+                all_sectors['concept'] = []
             
             # 获取行业板块  
-            if self.verbose:
-                print("获取行业板块...")
             try:
                 industry_df = ak.stock_board_industry_name_em()
-                if not industry_df.empty:
-                    sectors['行业板块'] = [
-                        {'code': row['板块代码'], 'name': row['板块名称']} 
-                        for _, row in industry_df.iterrows()
-                    ]
-                    if self.verbose:
-                        print(f"获取到 {len(sectors['行业板块'])} 个行业板块")
+                industry_list = []
+                for _, row in industry_df.iterrows():
+                    industry_list.append({
+                        'code': row['板块代码'],
+                        'name': row['板块名称'],
+                        'stock_count': row.get('成分股数量', 0),
+                        'type': '行业板块'
+                    })
+                all_sectors['industry'] = industry_list
+                if self.verbose:
+                    print(f"获取行业板块 {len(industry_list)} 个")
             except Exception as e:
                 if self.verbose:
                     print(f"获取行业板块失败: {e}")
-                sectors['行业板块'] = []
+                all_sectors['industry'] = []
             
             # 获取地域板块
-            if self.verbose:
-                print("获取地域板块...")
             try:
-                area_df = ak.stock_board_area_name_em()
-                if not area_df.empty:
-                    sectors['地域板块'] = [
-                        {'code': row['板块代码'], 'name': row['板块名称']} 
-                        for _, row in area_df.iterrows()
-                    ]
-                    if self.verbose:
-                        print(f"获取到 {len(sectors['地域板块'])} 个地域板块")
+                region_df = ak.stock_board_cons_name_em()  # 地域板块
+                region_list = []
+                for _, row in region_df.iterrows():
+                    if '地域' in str(row.get('板块名称', '')):
+                        region_list.append({
+                            'code': row['板块代码'],
+                            'name': row['板块名称'],
+                            'stock_count': row.get('成分股数量', 0),
+                            'type': '地域板块'
+                        })
+                all_sectors['region'] = region_list
+                if self.verbose:
+                    print(f"获取地域板块 {len(region_list)} 个")
             except Exception as e:
                 if self.verbose:
                     print(f"获取地域板块失败: {e}")
-                sectors['地域板块'] = []
+                all_sectors['region'] = []
             
-            return sectors
+            self.sectors_data = all_sectors
+            return all_sectors
             
         except Exception as e:
             if self.verbose:
-                print(f"获取板块列表失败: {e}")
+                print(f"获取板块数据失败: {e}")
             return {}
         finally:
             self._restore_proxies(original_http_proxy, original_https_proxy)
     
-    def display_sectors(self, sectors: Dict[str, List[Dict]]) -> None:
+    def get_sector_stocks(self, sector_code: str, sector_type: str = 'concept') -> pd.DataFrame:
         """
-        显示可选择的板块列表
-        :param sectors: 板块字典
-        """
-        if not self.verbose:
-            return
-            
-        print("\n可选择的板块类型:")
-        print("=" * 50)
-        
-        for sector_type, sector_list in sectors.items():
-            print(f"\n{sector_type} (共{len(sector_list)}个):")
-            print("-" * 40)
-            
-            # 显示前10个作为示例
-            for i, sector in enumerate(sector_list[:10]):
-                print(f"  {i+1:2d}. {sector['name']} ({sector['code']})")
-            
-            if len(sector_list) > 10:
-                print(f"  ... 还有 {len(sector_list) - 10} 个板块")
-    
-    def get_sector_stocks(self, sector_code: str, sector_type: str = "概念板块") -> pd.DataFrame:
-        """
-        获取指定板块的成分股
+        获取特定板块的成分股
         :param sector_code: 板块代码
-        :param sector_type: 板块类型
+        :param sector_type: 板块类型 ('concept', 'industry', 'region')
         :return: 成分股DataFrame
         """
         original_http_proxy, original_https_proxy = self._disable_proxies()
         
         try:
-            if self.verbose:
-                print(f"正在获取板块 {sector_code} 的成分股...")
-            
-            # 根据板块类型选择相应的API
-            if sector_type == "概念板块":
+            if sector_type == 'concept':
                 df = ak.stock_board_concept_cons_em(symbol=sector_code)
-            elif sector_type == "行业板块":
+            elif sector_type == 'industry':
                 df = ak.stock_board_industry_cons_em(symbol=sector_code)
-            elif sector_type == "地域板块":
-                df = ak.stock_board_area_cons_em(symbol=sector_code)
             else:
-                raise ValueError(f"不支持的板块类型: {sector_type}")
+                # 地域板块或其他
+                df = ak.stock_board_cons_em(symbol=sector_code)
             
-            if df is not None and not df.empty:
-                # 确保包含必要的列
-                required_columns = ['代码', '名称', '最新价', '总市值']
-                missing_columns = [col for col in required_columns if col not in df.columns]
+            # 数据清洗
+            if '代码' in df.columns:
+                df = df.rename(columns={'代码': 'stock_code'})
+            elif '股票代码' in df.columns:
+                df = df.rename(columns={'股票代码': 'stock_code'})
+            
+            if '名称' in df.columns:
+                df = df.rename(columns={'名称': 'stock_name'})
+            elif '股票名称' in df.columns:
+                df = df.rename(columns={'股票名称': 'stock_name'})
+            
+            # 添加市值等信息
+            if '总市值' in df.columns:
+                df['market_cap'] = pd.to_numeric(df['总市值'], errors='coerce')
+            elif '市值' in df.columns:
+                df['market_cap'] = pd.to_numeric(df['市值'], errors='coerce')
+            else:
+                df['market_cap'] = 0
                 
-                if missing_columns:
-                    if self.verbose:
-                        print(f"缺少列: {missing_columns}")
-                    # 尝试使用可用的列
-                    if '代码' in df.columns and '名称' in df.columns:
-                        return df[['代码', '名称']].copy()
-                else:
-                    return df
-            
-            return pd.DataFrame()
+            return df
             
         except Exception as e:
             if self.verbose:
-                print(f"获取板块成分股失败: {e}")
+                print(f"获取板块 {sector_code} 成分股失败: {e}")
             return pd.DataFrame()
         finally:
             self._restore_proxies(original_http_proxy, original_https_proxy)
     
-    def get_top_weight_stocks(self, sector_df: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
+    def get_top_stocks_by_market_cap(self, sector_code: str, sector_type: str = 'concept', top_n: int = 10) -> pd.DataFrame:
         """
         获取板块中市值前N的权重股
-        :param sector_df: 板块成分股DataFrame
-        :param top_n: 选取的股票数量
+        :param sector_code: 板块代码
+        :param sector_type: 板块类型
+        :param top_n: 取前N只股票，默认10只
         :return: 权重股DataFrame
         """
-        if sector_df.empty:
-            return pd.DataFrame()
+        df = self.get_sector_stocks(sector_code, sector_type)
         
-        # 如果有市值列，按市值排序
-        if '总市值' in sector_df.columns:
-            # 处理市值数据，可能包含单位（亿、万等）
-            sector_df = sector_df.copy()
-            market_cap = sector_df['总市值'].astype(str)
-            
-            # 转换市值为数值（假设单位为亿）
-            numeric_market_cap = []
-            for cap in market_cap:
-                try:
-                    if '亿' in cap:
-                        numeric_market_cap.append(float(cap.replace('亿', '').replace(',', '')))
-                    elif '万亿' in cap:
-                        numeric_market_cap.append(float(cap.replace('万亿', '').replace(',', '')) * 10000)
-                    else:
-                        numeric_market_cap.append(float(cap.replace(',', '')))
-                except:
-                    numeric_market_cap.append(0)
-            
-            sector_df['市值_数值'] = numeric_market_cap
-            top_stocks = sector_df.nlargest(top_n, '市值_数值')
+        if df.empty:
+            return df
+        
+        # 按市值排序，取前N只
+        if 'market_cap' in df.columns:
+            df_sorted = df.sort_values('market_cap', ascending=False)
         else:
-            # 如果没有市值列，就取前N个
-            top_stocks = sector_df.head(top_n)
+            # 如果没有市值信息，尝试获取实时市值信息
+            df_sorted = self._enrich_with_market_cap(df)
+        
+        top_stocks = df_sorted.head(top_n)
+        
+        if self.verbose:
+            print(f"板块 {sector_code} 中市值前 {len(top_stocks)} 只权重股:")
+            for _, row in top_stocks.iterrows():
+                market_cap = row.get('market_cap', 0)
+                if market_cap > 0:
+                    market_cap_str = f"{market_cap/100000000:.1f}亿" if market_cap > 100000000 else f"{market_cap/10000:.1f}万"
+                    print(f"  {row['stock_code']} {row.get('stock_name', 'N/A')} (市值: {market_cap_str})")
+                else:
+                    print(f"  {row['stock_code']} {row.get('stock_name', 'N/A')}")
         
         return top_stocks
     
-    def calculate_kdj(self, df: pd.DataFrame, n: int = 9, m1: int = 3, m2: int = 3) -> pd.DataFrame:
+    def _enrich_with_market_cap(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        计算KDJ指标
-        :param df: 股票数据DataFrame (包含high, low, close列)
-        :param n: RSV计算周期，默认9
-        :param m1: K值平滑周期，默认3
-        :param m2: D值平滑周期，默认3
-        :return: 包含KDJ值的DataFrame
+        为股票数据补充市值信息
+        :param df: 股票DataFrame
+        :return: 带市值信息的DataFrame
         """
-        df = df.copy()
+        original_http_proxy, original_https_proxy = self._disable_proxies()
         
-        # 计算RSV
-        low_n = df['low'].rolling(window=n).min()
-        high_n = df['high'].rolling(window=n).max()
-        rsv = (df['close'] - low_n) / (high_n - low_n) * 100
-        
-        # 计算K、D、J
-        df['K'] = rsv.ewm(span=m1).mean()
-        df['D'] = df['K'].ewm(span=m2).mean()
-        df['J'] = 3 * df['K'] - 2 * df['D']
-        
-        return df
+        try:
+            # 获取实时行情数据来计算市值
+            for idx, row in df.iterrows():
+                try:
+                    stock_code = row['stock_code']
+                    # 获取股票实时信息
+                    stock_info = ak.stock_individual_info_em(symbol=stock_code)
+                    if not stock_info.empty:
+                        # 查找总市值
+                        market_cap_row = stock_info[stock_info['item'] == '总市值']
+                        if not market_cap_row.empty:
+                            market_cap = pd.to_numeric(market_cap_row['value'].iloc[0], errors='coerce')
+                            df.at[idx, 'market_cap'] = market_cap if not pd.isna(market_cap) else 0
+                        else:
+                            df.at[idx, 'market_cap'] = 0
+                    else:
+                        df.at[idx, 'market_cap'] = 0
+                except:
+                    df.at[idx, 'market_cap'] = 0
+            
+            return df.sort_values('market_cap', ascending=False)
+            
+        except Exception as e:
+            if self.verbose:
+                print(f"补充市值信息失败: {e}")
+            return df
+        finally:
+            self._restore_proxies(original_http_proxy, original_https_proxy)
     
-    def filter_stocks_by_kdj(self, stocks_df: pd.DataFrame, target_date: str, kdj_threshold: float = 15) -> List[Dict]:
+    def get_stock_kdj_info(self, stock_codes: List[str], target_date: str) -> Dict[str, Dict]:
         """
-        根据KDJ指标筛选股票
-        :param stocks_df: 股票列表DataFrame
-        :param target_date: 目标日期
-        :param kdj_threshold: KDJ阈值，默认15
-        :return: 符合条件的股票列表
+        获取股票的KDJ指标信息
+        :param stock_codes: 股票代码列表
+        :param target_date: 目标日期，格式为 'YYYY-MM-DD'
+        :return: 股票KDJ信息字典
         """
-        if stocks_df.empty:
-            return []
-        
-        filtered_stocks = []
+        # 计算开始日期（往前推指定天数以获取足够的历史数据）
         target_date_obj = datetime.strptime(target_date, '%Y-%m-%d')
         start_date_obj = target_date_obj - timedelta(days=self.history_days)
         start_date = start_date_obj.strftime('%Y%m%d')
         end_date = target_date_obj.strftime('%Y%m%d')
         
-        for _, stock in stocks_df.iterrows():
-            symbol = stock['代码']
-            name = stock['名称']
-            
+        kdj_info = {}
+        
+        for stock_code in stock_codes:
             try:
                 # 获取股票历史数据
-                stock_data = self.data_handler.get_stock_data(symbol, start_date, end_date)
+                df = self.data_handler.get_stock_data(stock_code, start_date, end_date)
                 
-                if stock_data is not None and len(stock_data) > 20:
-                    # 计算KDJ
-                    stock_data_with_kdj = self.calculate_kdj(stock_data)
+                if df is not None and len(df) > 0 and target_date in df.index.astype(str):
+                    target_row = df.loc[target_date]
                     
-                    # 获取目标日期的KDJ值
-                    target_data = stock_data_with_kdj[stock_data_with_kdj.index.astype(str) == target_date]
+                    kdj_info[stock_code] = {
+                        'date': target_date,
+                        'close_price': target_row['close'],
+                        'K': target_row.get('K', None),
+                        'D': target_row.get('D', None),
+                        'J': target_row.get('J', None),
+                        'volume': target_row['volume'],
+                        'pct_change': target_row.get('pct_change', 0)
+                    }
+                else:
+                    if self.verbose:
+                        print(f"无法获取股票 {stock_code} 在 {target_date} 的数据")
                     
-                    if not target_data.empty:
-                        j_value = target_data['J'].iloc[0]
-                        k_value = target_data['K'].iloc[0]
-                        d_value = target_data['D'].iloc[0]
-                        current_price = target_data['close'].iloc[0]
-                        
-                        # 检查J值是否小于阈值
-                        if j_value < kdj_threshold:
-                            stock_info = {
-                                'symbol': symbol,
-                                'name': name,
-                                'price': current_price,
-                                'K': k_value,
-                                'D': d_value,
-                                'J': j_value,
-                                'date': target_date
-                            }
-                            
-                            # 如果原DataFrame包含市值信息，也加入
-                            if '总市值' in stock.index:
-                                stock_info['market_cap'] = stock['总市值']
-                            if '市值_数值' in stock.index:
-                                stock_info['market_cap_numeric'] = stock['市值_数值']
-                                
-                            filtered_stocks.append(stock_info)
-                            
-                            if self.verbose:
-                                print(f"找到符合条件的股票: {symbol} {name}, J={j_value:.2f}")
-                
             except Exception as e:
                 if self.verbose:
-                    print(f"处理股票 {symbol} 时出错: {e}")
-                continue
+                    print(f"获取股票 {stock_code} KDJ信息失败: {e}")
+        
+        return kdj_info
+    
+    def filter_kdj_stocks(self, kdj_info: Dict[str, Dict], kdj_threshold: float = 15.0) -> Dict[str, Dict]:
+        """
+        筛选KDJ指标小于阈值的股票
+        :param kdj_info: 股票KDJ信息字典
+        :param kdj_threshold: KDJ阈值，默认15
+        :return: 筛选后的股票信息
+        """
+        filtered_stocks = {}
+        
+        for stock_code, info in kdj_info.items():
+            j_value = info.get('J')
+            if j_value is not None and j_value < kdj_threshold:
+                filtered_stocks[stock_code] = info
         
         return filtered_stocks
     
-    def display_filtered_results(self, filtered_stocks: List[Dict], sector_name: str) -> None:
+    def display_sectors(self, sectors_data: Dict[str, List[Dict]]) -> None:
         """
-        显示筛选结果
-        :param filtered_stocks: 筛选出的股票列表
-        :param sector_name: 板块名称
+        显示所有板块信息
+        :param sectors_data: 板块数据字典
         """
         if not self.verbose:
             return
+        
+        print("\n================ 板块列表 ================")
+        
+        for sector_type, sectors in sectors_data.items():
+            type_name = {
+                'concept': '概念板块',
+                'industry': '行业板块', 
+                'region': '地域板块'
+            }.get(sector_type, sector_type)
             
-        print(f"\n板块 [{sector_name}] KDJ<15 的股票筛选结果:")
-        print("=" * 80)
+            print(f"\n{type_name} (共 {len(sectors)} 个):")
+            print("-" * 50)
+            
+            for i, sector in enumerate(sectors[:20]):  # 只显示前20个
+                print(f"{i+1:2d}. {sector['code']} - {sector['name']} (成分股: {sector.get('stock_count', 'N/A')})")
+            
+            if len(sectors) > 20:
+                print(f"... 还有 {len(sectors) - 20} 个板块")
+    
+    def display_filtered_results(self, filtered_stocks: Dict[str, Dict], stock_names: Dict[str, str] = None) -> None:
+        """
+        显示筛选结果
+        :param filtered_stocks: 筛选后的股票信息
+        :param stock_names: 股票名称字典
+        """
+        if not self.verbose:
+            return
+        
+        print(f"\n================ KDJ筛选结果 ================")
+        print(f"共筛选出 {len(filtered_stocks)} 只股票 (J值 < 15):")
+        print("-" * 80)
         
         if filtered_stocks:
-            print(f"{'股票代码':<10} {'股票名称':<15} {'当前价格':<10} {'K值':<8} {'D值':<8} {'J值':<8} {'市值':<12}")
+            print(f"{'股票代码':<12} {'股票名称':<15} {'收盘价':<10} {'J值':<8} {'K值':<8} {'D值':<8} {'涨跌幅%':<10}")
             print("-" * 80)
             
-            for stock in filtered_stocks:
-                market_cap_str = stock.get('market_cap', 'N/A')
-                print(f"{stock['symbol']:<10} {stock['name']:<15} {stock['price']:<10.2f} "
-                      f"{stock['K']:<8.2f} {stock['D']:<8.2f} {stock['J']:<8.2f} {market_cap_str:<12}")
+            # 按J值排序
+            sorted_stocks = sorted(filtered_stocks.items(), key=lambda x: x[1].get('J', 999))
+            
+            for stock_code, info in sorted_stocks:
+                stock_name = stock_names.get(stock_code, 'N/A') if stock_names else 'N/A'
+                
+                print(f"{stock_code:<12} {stock_name:<15} "
+                      f"{info['close_price']:<10.2f} "
+                      f"{info.get('J', 'N/A'):<8.2f} "
+                      f"{info.get('K', 'N/A'):<8.2f} "
+                      f"{info.get('D', 'N/A'):<8.2f} "
+                      f"{info.get('pct_change', 0):<10.2f}")
         else:
-            print("该板块没有符合条件的股票。")
+            print("没有股票符合筛选条件。")
     
-    def save_results_to_csv(self, filtered_stocks: List[Dict], sector_name: str, target_date: str) -> str:
+    def save_results_to_csv(self, 
+                           filtered_stocks: Dict[str, Dict], 
+                           target_date: str,
+                           sector_info: str = "",
+                           stock_names: Dict[str, str] = None) -> str:
         """
         将筛选结果保存到CSV文件
-        :param filtered_stocks: 筛选出的股票列表
-        :param sector_name: 板块名称
+        :param filtered_stocks: 筛选结果字典
         :param target_date: 目标日期
+        :param sector_info: 板块信息
+        :param stock_names: 股票名称字典
         :return: 保存的文件路径
         """
-        if not filtered_stocks:
-            return ""
-        
         # 创建results目录（如果不存在）
         if not os.path.exists('results'):
             os.makedirs('results')
         
-        # 创建DataFrame
-        df = pd.DataFrame(filtered_stocks)
+        # 准备数据
+        data = []
+        for stock_code, info in filtered_stocks.items():
+            stock_name = stock_names.get(stock_code, 'N/A') if stock_names else 'N/A'
+            data.append({
+                '股票代码': stock_code,
+                '股票名称': stock_name,
+                '日期': info['date'],
+                '收盘价': info['close_price'],
+                'J值': info.get('J', None),
+                'K值': info.get('K', None),
+                'D值': info.get('D', None),
+                '涨跌幅%': info.get('pct_change', 0),
+                '成交量': info['volume'],
+                '板块信息': sector_info
+            })
         
-        # 重新排列列的顺序
-        columns_order = ['symbol', 'name', 'price', 'K', 'D', 'J', 'date']
-        if 'market_cap' in df.columns:
-            columns_order.append('market_cap')
-        if 'market_cap_numeric' in df.columns:
-            columns_order.append('market_cap_numeric')
+        # 创建DataFrame并保存
+        if data:
+            df = pd.DataFrame(data)
+            filename = f"results/index_contribution_filtered_{target_date.replace('-', '')}_{sector_info.replace(' ', '_')}.csv"
+            df.to_csv(filename, index=False, encoding='utf-8-sig')
+            if self.verbose:
+                print(f"\n筛选结果已保存至: {filename}")
+            return filename
         
-        df = df[columns_order]
-        
-        # 保存文件
-        filename = f"results/index_contribution_{sector_name.replace('/', '_')}_{target_date.replace('-', '')}.csv"
-        df.to_csv(filename, index=False, encoding='utf-8-sig')
-        
-        if self.verbose:
-            print(f"\n筛选结果已保存至: {filename}")
-        
-        return filename
+        return ""
     
-    def run(self, 
+    def run(self,
             target_date: str,
-            sector_type: str = "概念板块",
-            sector_name: Optional[str] = None,
-            sector_code: Optional[str] = None, 
+            sector_codes: Optional[List[str]] = None,
+            sector_type: str = 'concept',
             top_n: int = 10,
-            kdj_threshold: float = 15,
+            kdj_threshold: float = 15.0,
             save_results: bool = True) -> Dict[str, Any]:
         """
-        运行指数贡献筛选策略
+        运行完整的指数贡献筛选流程
         :param target_date: 目标日期，格式为 'YYYY-MM-DD'
-        :param sector_type: 板块类型 ('概念板块', '行业板块', '地域板块')
-        :param sector_name: 板块名称
-        :param sector_code: 板块代码
-        :param top_n: 每个板块选取的权重股数量
-        :param kdj_threshold: KDJ阈值
+        :param sector_codes: 指定的板块代码列表，如果为None则显示所有板块供选择
+        :param sector_type: 板块类型 ('concept', 'industry', 'region')
+        :param top_n: 每个板块取市值前N只股票，默认10只
+        :param kdj_threshold: KDJ阈值，默认15
         :param save_results: 是否保存结果到CSV
         :return: 筛选结果
         """
         if self.verbose:
-            print(f"指数贡献筛选策略 - 目标日期: {target_date}")
+            print(f"运行指数贡献选股策略 - {target_date}")
             print("=" * 60)
         
-        # 1. 获取所有板块列表
-        if sector_code is None:
-            sectors = self.get_all_sectors()
-            self.display_sectors(sectors)
+        # 获取所有板块信息
+        all_sectors = self.get_all_sectors()
+        
+        if not sector_codes:
+            # 显示所有板块供用户选择
+            self.display_sectors(all_sectors)
+            return {"sectors": all_sectors, "filtered_stocks": {}}
+        
+        # 处理指定的板块
+        all_filtered_stocks = {}
+        stock_names = {}
+        
+        for sector_code in sector_codes:
+            if self.verbose:
+                print(f"\n处理板块: {sector_code}")
+                print("-" * 40)
             
-            # 如果没有指定板块，返回板块列表供用户选择
-            if sector_name is None:
-                return {"sectors": sectors, "message": "请选择要分析的板块"}
-        
-        # 2. 获取指定板块的成分股
-        if sector_code:
-            sector_stocks = self.get_sector_stocks(sector_code, sector_type)
-            used_sector_name = sector_name or sector_code
-        else:
-            return {"error": "请提供板块代码"}
-        
-        if sector_stocks.empty:
-            return {"error": f"无法获取板块 {sector_code} 的成分股"}
-        
-        if self.verbose:
-            print(f"\n板块 [{used_sector_name}] 共有 {len(sector_stocks)} 只成分股")
-        
-        # 3. 获取权重股（市值前N）
-        top_stocks = self.get_top_weight_stocks(sector_stocks, top_n)
-        
-        if self.verbose:
-            print(f"选取市值前 {len(top_stocks)} 只权重股进行分析")
-        
-        # 4. 显示权重股详细信息
-        if self.verbose and not top_stocks.empty:
-            print(f"\n权重股详细信息:")
-            print("-" * 60)
-            for i, (_, stock) in enumerate(top_stocks.iterrows(), 1):
-                market_cap = stock.get('总市值', 'N/A')
-                price = stock.get('最新价', 'N/A')
-                print(f"{i:2d}. {stock['代码']} {stock['名称']:<15} 价格:{price} 市值:{market_cap}")
-        
-        # 5. 筛选KDJ<阈值的股票
-        filtered_stocks = self.filter_stocks_by_kdj(top_stocks, target_date, kdj_threshold)
+            # 获取板块权重股
+            top_stocks = self.get_top_stocks_by_market_cap(sector_code, sector_type, top_n)
+            
+            if top_stocks.empty:
+                if self.verbose:
+                    print(f"板块 {sector_code} 没有找到成分股")
+                continue
+            
+            # 收集股票名称
+            for _, row in top_stocks.iterrows():
+                stock_names[row['stock_code']] = row.get('stock_name', 'N/A')
+            
+            # 获取股票KDJ信息
+            stock_codes = top_stocks['stock_code'].tolist()
+            kdj_info = self.get_stock_kdj_info(stock_codes, target_date)
+            
+            # 筛选KDJ < threshold的股票
+            filtered_stocks = self.filter_kdj_stocks(kdj_info, kdj_threshold)
+            
+            # 合并结果
+            all_filtered_stocks.update(filtered_stocks)
         
         # 显示结果
-        self.display_filtered_results(filtered_stocks, used_sector_name)
+        self.display_filtered_results(all_filtered_stocks, stock_names)
         
         # 保存结果
-        if save_results and filtered_stocks:
-            self.save_results_to_csv(filtered_stocks, used_sector_name, target_date)
+        if save_results and all_filtered_stocks:
+            sector_info = "_".join(sector_codes) if len(sector_codes) <= 3 else f"{len(sector_codes)}_sectors"
+            self.save_results_to_csv(all_filtered_stocks, target_date, sector_info, stock_names)
         
         return {
-            "sector_name": used_sector_name,
-            "sector_code": sector_code,
-            "total_stocks": len(sector_stocks),
-            "top_stocks": len(top_stocks),
-            "filtered_stocks": filtered_stocks,
-            "kdj_threshold": kdj_threshold
+            "sectors": all_sectors,
+            "filtered_stocks": all_filtered_stocks,
+            "stock_names": stock_names
         }
 
 
 def main():
     parser = argparse.ArgumentParser(description='指数贡献选股策略工具')
     parser.add_argument('--date', type=str, required=True, help='查询日期，格式为YYYY-MM-DD')
-    parser.add_argument('--sector_type', type=str, default='概念板块', 
-                        choices=['概念板块', '行业板块', '地域板块'],
-                        help='板块类型')
-    parser.add_argument('--sector_code', type=str, help='板块代码')
-    parser.add_argument('--sector_name', type=str, help='板块名称')
-    parser.add_argument('--top_n', type=int, default=10, help='每个板块选取的权重股数量')
-    parser.add_argument('--kdj_threshold', type=float, default=15, help='KDJ阈值')
+    parser.add_argument('--sectors', type=str, nargs='*', help='指定板块代码，多个用空格分隔')
+    parser.add_argument('--sector_type', type=str, default='concept', 
+                        choices=['concept', 'industry', 'region'],
+                        help='板块类型: concept(概念), industry(行业), region(地域)')
+    parser.add_argument('--top_n', type=int, default=10, help='每个板块取市值前N只股票，默认10只')
+    parser.add_argument('--kdj_threshold', type=float, default=15.0, help='KDJ阈值，默认15')
     parser.add_argument('--no_save', action='store_true', help='不保存结果到CSV文件')
     parser.add_argument('--quiet', action='store_true', help='静默模式，不打印详细信息')
+    parser.add_argument('--list_sectors', action='store_true', help='只列出所有板块，不进行筛选')
+    
     args = parser.parse_args()
     
     # 禁用代理设置
@@ -481,21 +509,24 @@ def main():
     os.environ['http_proxy'] = ''
     os.environ['https_proxy'] = ''
     
-    # 创建筛选器实例并运行
+    # 创建筛选器实例
     filter = IndexContributionFilter(verbose=not args.quiet)
-    result = filter.run(
+    
+    # 如果只是列出板块
+    if args.list_sectors:
+        sectors = filter.get_all_sectors()
+        filter.display_sectors(sectors)
+        return
+    
+    # 运行筛选流程
+    filter.run(
         target_date=args.date,
+        sector_codes=args.sectors,
         sector_type=args.sector_type,
-        sector_name=args.sector_name,
-        sector_code=args.sector_code,
         top_n=args.top_n,
         kdj_threshold=args.kdj_threshold,
         save_results=not args.no_save
     )
-    
-    if "sectors" in result:
-        print("\n使用示例:")
-        print("python filter/index_contribution_filter.py --date 2025-08-01 --sector_code BK0447 --sector_name 白酒概念")
 
 
 if __name__ == "__main__":
@@ -503,6 +534,7 @@ if __name__ == "__main__":
 
 
 # 示例用法:
-# python filter/index_contribution_filter.py --date 2025-08-01 --sector_type 概念板块 --sector_code BK0447 --sector_name 白酒概念
-# python filter/index_contribution_filter.py --date 2025-08-01 --sector_type 行业板块 --sector_code BK0464 --top_n 15
-# python filter/index_contribution_filter.py --date 2025-08-01 --sector_type 地域板块 --sector_code BK0493 --kdj_threshold 10
+# python filter/index_contribution_filter.py --date 2025-08-01 --list_sectors  # 列出所有板块
+# python filter/index_contribution_filter.py --date 2025-08-01 --sectors BK0447 BK0478  # 筛选指定概念板块
+# python filter/index_contribution_filter.py --date 2025-08-01 --sectors BK0447 --sector_type industry --top_n 5  # 筛选行业板块前5只
+# python filter/index_contribution_filter.py --date 2025-08-01 --sectors BK0447 --kdj_threshold 10  # 使用更严格的KDJ阈值
