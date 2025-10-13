@@ -5,6 +5,7 @@ import pandas as pd
 
 from .portfolio import Portfolio
 from util.market_data_handler import MarketDataHandler
+from strategies.execution.base import ExecutionModel
 
 
 class Backtester:
@@ -16,11 +17,12 @@ class Backtester:
     def __init__(self,
                  data_handler: MarketDataHandler,
                  strategy,
+                 execution_model: ExecutionModel | None = None,
                  initial_capital: float = 1_000_000,
                  max_positions: int = 5,
                  lookback_days: int = 180,
-                 commission_rate: float = 0.0005,  # 单边手续费
-                 slippage_bp: float = 5.0,          # 成交滑点 基点(basis points)
+                 commission_rate: float = 0.0005,
+                 slippage_bp: float = 5.0,
                  position_sizer: Optional[Callable[[float, int, float], int]] = None):
         self.data_handler = data_handler
         self.strategy = strategy
@@ -30,11 +32,13 @@ class Backtester:
         self.commission_rate = commission_rate
         self.slippage_bp = slippage_bp
         self.portfolio = Portfolio(initial_capital)
+        self.execution_model = execution_model  # new pluggable execution abstraction
         self.position_sizer = position_sizer or self.equal_weight_sizer
-        self.trades = []  # type: List[Dict[str, Any]]
-        self.market_cache = {}  # type: Dict[str, Any]
-        # pending entry signals waiting for future execution (e.g., T+1 open)
-        self.pending_entries = []  # type: List[Dict[str, Any]]
+        self.trades: List[Dict[str, Any]] = []
+        self.market_cache: Dict[str, Any] = {}
+        # planned orders waiting for their exec_date
+        self.pending_entries: List[Dict[str, Any]] = []
+        self._calendar: List[pd.Timestamp] = []
 
     # --- sizing helpers ---
     def equal_weight_sizer(self, cash: float, remaining_slots: int, price: float) -> int:
@@ -132,6 +136,8 @@ class Backtester:
             'pnl': 0.0,
             'commission': commission,
             'reason': sig.get('meta', {}).get('execution', 'entry'),
+            'session': sig.get('session', 'close'),
+            'signal_date': sig.get('signal_date'),
         })
         return remaining_slots - 1
 
@@ -139,23 +145,30 @@ class Backtester:
         remaining_slots = self.max_positions - len(self.portfolio.positions)
         if remaining_slots <= 0:
             return
-        entry_signals = self.strategy.generate_entries(market_data)
-        # separate future (pending) vs immediate signals
-        for sig in entry_signals:
+        raw_signals: List[Dict[str, Any]] = []
+        if hasattr(self.strategy, 'generate_entries'):
+            raw_signals = self.strategy.generate_entries(market_data) or []
+        planned: List[Dict[str, Any]] = []
+        # Separate legacy pre-planned signals (with exec_date) and raw signals
+        legacy = [s for s in raw_signals if 'exec_date' in s]
+        planned.extend(legacy)
+        to_plan = [s for s in raw_signals if 'exec_date' not in s]
+        if to_plan and self.execution_model is not None:
+            planned.extend(self.execution_model.plan(to_plan, dt, self._calendar))
+        # queue or execute
+        for sig in planned:
             sym = sig['symbol']
             df = market_data.get(sym)
             if df is None:
                 continue
-            exec_date = sig.get('exec_date')
-            exec_price_type = sig.get('exec_price_type', 'close')
-            if exec_date and exec_date != dt:
-                # future execution; store if not duplicate
-                self.pending_entries.append({**sig, 'exec_price_type': exec_price_type})
+            exec_date = sig.get('exec_date', dt)
+            price_type = sig.get('exec_price_type', 'close')
+            if exec_date != dt:
+                self.pending_entries.append(sig)
                 continue
-            # immediate execution (same day close by default)
-            remaining_slots = self._execute_entry(dt, sym, df, sig, exec_price_type, remaining_slots)
             if remaining_slots <= 0:
                 break
+            remaining_slots = self._execute_entry(dt, sym, df, sig, price_type, remaining_slots)
 
     def _process_pending_entries(self, dt: pd.Timestamp, market_data: Dict[str, Any]):
         if not self.pending_entries:
@@ -180,10 +193,15 @@ class Backtester:
 
     def run(self, start_date: str, end_date: str, universe_size: int = 100):  # pragma: no cover
         dates = pd.date_range(start_date, end_date, freq='B')
+        self._calendar = list(dates)
         symbols = self.data_handler.get_hs300_components()[:universe_size]
         for dt in dates:
             market_data = self._load_daily_universe(dt, symbols)
-            # 1. 先处理 T+1 等待的开盘买入
+            # 0. 开盘 snapshot （使用开盘价估值，如果有）
+            open_prices = {s: float(df.loc[dt, 'open']) for s, df in market_data.items() if dt in df.index and 'open' in df.columns}
+            if open_prices:
+                self.portfolio.mark_session(dt, 'open', open_prices)
+            # 1. 先处理 T+1 等待的开盘买入 (执行价=开盘)
             self._process_pending_entries(dt, market_data)
             # 2. 处理持仓退出（按收盘逻辑）
             self._process_exits(dt, market_data)
@@ -191,5 +209,5 @@ class Backtester:
             self._process_entries(dt, market_data)
             # mark to market
             close_prices = {s: float(df.loc[dt, 'close']) for s, df in market_data.items() if dt in df.index}
-            self.portfolio.mark_to_market(dt, close_prices)
+            self.portfolio.mark_session(dt, 'close', close_prices)
         return {"history": self.portfolio.history, "trades": self.trades, "strategy_config": getattr(self.strategy, 'to_dict', lambda: {} )()}
