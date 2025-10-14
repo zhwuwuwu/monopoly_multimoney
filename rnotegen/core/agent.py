@@ -116,7 +116,7 @@ class ColumnistAgent:
         
         try:
             response_content = response.choices[0].message.content
-            logger.info(f"Raw analysis response: {response_content[:300]}...")
+            logger.info(f"Raw ANALYSIS Response: {response_content[:300]}...")
             
             # Extract JSON from code block if present
             if response_content.startswith("```json"):
@@ -238,7 +238,7 @@ class ColumnistAgent:
         
         try:
             response_content = response.choices[0].message.content
-            logger.info(f"Raw response content: {response_content[:500]}...")  # Log first 500 chars
+            logger.info(f"Raw CONTENT Response: {response_content[:200]}...")  # Log first 500 chars
             
             # Extract JSON from code block if present
             if response_content.startswith("```json"):
@@ -295,7 +295,11 @@ class ColumnistAgent:
         7. 法律安全性 (1-10分)
         
         请指出潜在风险，需要改进的地方，并给出总体评分。
-        返回JSON格式结果。
+        
+        返回JSON格式结果，必须包含以下字段：
+        - 各项评分 (数字1-10)
+        - total_score: 总体评分 (各项平均分)
+        - 潜在风险和改进建议
         """
         
         response = await self.openai_client.chat.completions.create(
@@ -308,11 +312,29 @@ class ColumnistAgent:
         )
         
         try:
-            review_result = json.loads(response.choices[0].message.content)
+            response_content = response.choices[0].message.content
+            logger.info(f"Raw REVIEW response: {response_content[:300]}...")
+            
+            # Extract JSON from code block if present
+            if response_content.startswith("```json"):
+                # Find the JSON content between ```json and ```
+                start = response_content.find("```json") + len("```json")
+                end = response_content.rfind("```")
+                if end > start:
+                    response_content = response_content[start:end].strip()
+            
+            # Clean up the JSON content to handle control characters
+            import re
+            response_content = re.sub(r'[\n\r\t]', ' ', response_content)
+            response_content = re.sub(r'\s+', ' ', response_content)  # Normalize whitespace
+            
+            review_result = json.loads(response_content)
             logger.info(f"Content review completed with score: {review_result.get('total_score', 'N/A')}")
             return review_result
-        except json.JSONDecodeError:
-            logger.error("Failed to parse review response as JSON")
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse review response as JSON: {e}")
+            logger.error(f"Review response content: {response.choices[0].message.content}")
             return {"error": "Failed to review content"}
     
     async def shutdown(self):
