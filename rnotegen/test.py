@@ -15,7 +15,7 @@ sys.path.insert(0, str(project_root))
 os.chdir(project_root)
 
 # Import with absolute paths
-from core.agent import ColumnistAgent, Material
+from core import WriterAgent, Material
 from utils.logger import setup_logging
 
 
@@ -45,11 +45,11 @@ async def test_basic_functionality():
         
         # Initialize agent
         print("2. Initializing agent...")
-        agent = ColumnistAgent("config")
-        print("✓ Agent initialized successfully")
+        writer = WriterAgent("config")
+        print("✓ WriterAgent initialized successfully")
         
         # Test materials loading
-        print("2. Testing materials loading...")
+        print("3. Testing materials loading...")
         test_materials = [
             Material(
                 title="测试标题",
@@ -62,22 +62,21 @@ async def test_basic_functionality():
         print("✓ Materials created successfully")
         
         # Test material analysis
-        print("3. Testing material analysis...")
-        analysis = await agent.analyze_materials(test_materials)
-        print(f"✓ Analysis completed: {len(str(analysis))} characters")
+        print("4. Testing material analysis (inline in generation loop)...")
+        print("(i) 分析在 function calling 循环内执行，无单独调用接口")
         
         # Test content generation (mock)
-        print("4. Testing content generation...")
+        print("5. Testing content generation...")
         # Note: This will fail without valid OpenAI API key
         try:
-            content = await agent.generate_content("social_trends", test_materials, "测试上下文")
+            content = await writer.generate("social_trends", test_materials, "测试上下文")
             print(f"✓ Content generated: {content.title}")
         except Exception as e:
             print(f"⚠ Content generation test skipped (需要有效的OpenAI API密钥): {e}")
         
         # Cleanup
-        await agent.shutdown()
-        print("✓ Agent shutdown completed")
+        await writer.shutdown()
+        print("✓ WriterAgent shutdown completed")
         
         print("\n=== All tests completed successfully! ===")
         
