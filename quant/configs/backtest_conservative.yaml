@@ -1,0 +1,34 @@
+# 保守策略回测配置
+
+backtest:
+  start: "2025-01-01"
+  end: "2025-12-31"
+  
+  strategy:
+    name: "conservative_long_term"
+    selection: "b1"
+    selection_params:
+      j_threshold: -15     # 严格的超卖条件
+      big_positive_pct: 0.07
+      ma_window: 30        # 较长的均线周期
+    
+    entry: "b1"
+    entry_params:
+      stop_loss_pct: 0.08
+      take_profit_pct: 0.18
+    
+    exit: "fixed"
+    exit_params:
+      stop_loss: 0.08
+      target_price_pct: 0.18
+    
+    execution: "next_open"
+  
+  initial: 1000000
+  max_positions: 3         # 较少的持仓
+  universe: 50             # 较小的股票池
+  commission: 0.0005
+  slippage_bp: 5.0
+  
+  plot: true
+  export: "results/conservative_strategy"

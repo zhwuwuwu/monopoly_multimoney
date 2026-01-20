@@ -24,7 +24,7 @@ from .base import ExitSignalStrategy, ExitDecision
 @dataclass
 class TimeBasedExit(ExitSignalStrategy):
     name: str = "time_exit"
-    max_holding_days: int = 20
+    max_holding_days: int = 10
 
     def evaluate(self, position: Dict[str, Any], bar: Dict[str, Any]) -> ExitDecision:  # type: ignore[override]
         holding_days = (bar['date'] - position['entry_date']).days

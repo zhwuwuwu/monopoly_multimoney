@@ -25,7 +25,7 @@ class B1Entry(EntrySignalStrategy):
         'stop_loss_pct': 0.12,
         'take_profit_pct': 0.3,
         'min_trade_days': 20,
-        'j_threshold': -10,
+        'j_threshold': 13,
         'big_positive_pct': 0.05,
         'ma_window': 20,
     }

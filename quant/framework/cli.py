@@ -1,98 +1,330 @@
-"""统一 CLI 入口
+"""统一 CLI 入口（重构版） - 支持YAML配置，仅保留 backtest/experiments/tests。
 
-提供子命令：
-  filter   运行 B1 选股筛选
-  backtest (预留) 回测接口扩展
-  tests    触发单元测试入口包装
-
+核心改进：
+  1. 移除 filter 入口，专注于回测和实验
+  2. 所有策略通过 factory 统一构建（四层完整）
+  3. 支持YAML配置文件
+  4. 支持预设策略和自定义策略
+  
 用法示例：
-  python -m framework.cli filter --date 2025-08-01 --strategy default --stock_pool hs300
-  python -m framework.cli tests
+  # 使用预设策略
+  python -m framework.cli backtest --config configs/backtest.yaml --preset b1_tplus1
+  
+  # 使用YAML配置自定义策略
+  python -m framework.cli backtest --config configs/custom_strategy.yaml
+  
+  # 命令行参数覆盖
+  python -m framework.cli backtest --config configs/base.yaml --initial 2000000
 """
 from __future__ import annotations
 
 import argparse
 import os
 import sys
-from typing import Optional
+import warnings
+from typing import Optional, Dict, Any
 
-from strategies.selection.b1_variants import build_b1_selection_variant
-from framework.screener import StockPoolProvider, StockScreener
-from strategies.composite.registry import get_strategy
+# 过滤第三方库的 FutureWarning（如 akshare/pandas）
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
+
 from strategies.composite.factory import build_custom_strategy
-from strategies.composite.b1_composite import B1CompositeStrategy
+from strategies.composite.presets import get_preset_config, list_presets
 from framework.engine import BacktestEngine, run_parallel_experiments
 from framework.visualize import plot_equity, compare_equity
 
 
-def cmd_filter(args: argparse.Namespace):
-    # 环境代理屏蔽（与旧实现一致）
-    for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
-        os.environ[k] = ""
+def load_yaml_config(config_path: str) -> Dict[str, Any]:
+    """加载YAML配置文件"""
+    if not YAML_AVAILABLE:
+        print("错误: 需要安装 PyYAML 才能使用配置文件功能")
+        print("请运行: pip install pyyaml")
+        sys.exit(1)
+    
+    if not os.path.exists(config_path):
+        print(f"错误: 配置文件不存在: {config_path}")
+        sys.exit(1)
+    
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+            return config or {}
+    except Exception as e:
+        print(f"错误: 无法解析YAML配置文件: {e}")
+        sys.exit(1)
 
-    selection = build_b1_selection_variant(args.strategy) if args.strategy else None
-    pool_provider = StockPoolProvider(verbose=not args.quiet)
-    screener = StockScreener(history_days=60, verbose=not args.quiet)
-    custom_symbols = None
-    if args.stock_pool == 'custom' and args.symbols_file:
-        # 尝试读取自定义股票池
-        encodings = [args.encoding, 'utf-8', 'gbk']
-        for enc in encodings:
-            try:
-                with open(args.symbols_file, 'r', encoding=enc) as f:
-                    custom_symbols = [line.strip() for line in f if line.strip()]
-                if not args.quiet:
-                    print(f"读取自定义股票池成功(编码={enc})：{len(custom_symbols)} 只")
-                break
-            except Exception:  # noqa
-                continue
-        if custom_symbols is None:
-            print("自定义股票池文件读取失败，退出。")
-            sys.exit(1)
 
-    symbols = custom_symbols if (args.stock_pool == 'custom' and custom_symbols) else pool_provider.get_symbols(args.stock_pool)
-    if args.stock_count > 0:
-        symbols = symbols[:args.stock_count]
-    # 加载数据并执行
-    market_data = screener.load_stock_data(symbols, args.date)
-    if selection is None:
-        # 默认使用 composite 注册的 b1 selection
-        composite = get_strategy('b1')
-        selection = composite.selection
-    # details mode
-    if getattr(args, 'details', False) and hasattr(selection, 'select_with_details'):
-        details = selection.select_with_details(market_data)  # type: ignore
-        selected = [d.symbol for d in details]
-        if not args.quiet:
-            print(f"选出 {len(selected)} 只股票：")
-            for d in details:
-                print(f"  {d.symbol} score={d.score} reasons={','.join(d.reasons)}")
-        if getattr(args, 'plot', False):
-            try:
-                selection.visualize(details, top_n=30)
-            except Exception as e:  # noqa
-                print(f"可视化失败: {e}")
-    else:
-        selected = selection.select(market_data)
-        if not args.quiet:
-            print(f"选出 {len(selected)} 只股票: {selected}")
-    # 可选保存
-    if not args.no_save:
+def merge_config_and_args(config: Dict[str, Any], args: argparse.Namespace, command: str) -> argparse.Namespace:
+    """合并YAML配置和命令行参数，命令行参数优先级更高"""
+    if not config:
+        return args
+    
+    cmd_config = config.get(command, {})
+    
+    # 构建命令行提供的参数集合
+    provided_args = set()
+    for arg in sys.argv:
+        if arg.startswith('--'):
+            provided_args.add(arg[2:].replace('-', '_'))
+    
+    for key, value in cmd_config.items():
+        attr_key = key.replace('-', '_')
+        
+        # 只有当命令行未提供该参数时，才使用配置文件的值
+        if attr_key not in provided_args and hasattr(args, attr_key):
+            current_value = getattr(args, attr_key)
+            # 对于列表类型，特殊处理
+            if isinstance(current_value, list) and not current_value:
+                setattr(args, attr_key, value if isinstance(value, list) else [value])
+            elif current_value is None or isinstance(current_value, (int, float, str, bool)):
+                setattr(args, attr_key, value)
+    
+    return args
+
+
+def build_strategy_from_config(config: Dict[str, Any], args: argparse.Namespace):
+    """从配置构建策略"""
+    # 优先使用预设
+    if hasattr(args, 'preset') and args.preset:
+        print(f"使用预设策略: {args.preset}")
+        preset_config = get_preset_config(args.preset)
+        return build_custom_strategy(
+            selection_name=preset_config['selection'],
+            entry_name=preset_config['entry'],
+            exit_name=preset_config['exit'],
+            execution_name=preset_config['execution'],
+            selection_params=preset_config.get('selection_params'),
+            entry_params=preset_config.get('entry_params'),
+            exit_params=preset_config.get('exit_params'),
+            name=args.preset,
+            validate=True
+        )
+    
+    # 从配置或命令行参数构建
+    strategy_config = config.get('strategy', {})
+    
+    selection = getattr(args, 'selection', None) or strategy_config.get('selection', 'b1')
+    entry = getattr(args, 'entry', None) or strategy_config.get('entry', 'b1')
+    exit = getattr(args, 'exit', None) or strategy_config.get('exit', 'fixed')
+    execution = getattr(args, 'execution', None) or strategy_config.get('execution', 'close')
+    
+    selection_params = strategy_config.get('selection_params', {})
+    entry_params = strategy_config.get('entry_params', {})
+    exit_params = strategy_config.get('exit_params', {})
+    
+    name = getattr(args, 'name', None) or strategy_config.get('name', 'custom_strategy')
+    
+    print(f"构建自定义策略: {name}")
+    print(f"  选股: {selection}")
+    print(f"  入场: {entry}")
+    print(f"  退出: {exit}")
+    print(f"  执行: {execution}")
+    
+    return build_custom_strategy(
+        selection_name=selection,
+        entry_name=entry,
+        exit_name=exit,
+        execution_name=execution,
+        selection_params=selection_params,
+        entry_params=entry_params,
+        exit_params=exit_params,
+        name=name,
+        validate=True
+    )
+
+
+def cmd_backtest(args: argparse.Namespace):
+    """执行回测命令"""
+    # 加载配置
+    config = {}
+    if hasattr(args, 'config') and args.config:
+        config = load_yaml_config(args.config)
+        args = merge_config_and_args(config, args, 'backtest')
+    
+    # 验证必要参数
+    if not args.start or not args.end:
+        print("错误: 必须提供 --start 和 --end 参数")
+        sys.exit(1)
+    
+    # 构建策略
+    strategy = build_strategy_from_config(config, args)
+    
+    # 临时注册策略到 registry（避免 engine 重新构建）
+    from strategies.composite.registry import STRATEGY_BUILDERS
+    temp_strategy_name = '__temp_cli_strategy__'
+    STRATEGY_BUILDERS[temp_strategy_name] = lambda **kwargs: strategy
+    
+    # 创建引擎并运行
+    engine = BacktestEngine(
+        strategy_name=temp_strategy_name,
+        strategy_kwargs={},
+        initial_capital=args.initial
+    )
+    
+    res = engine.run(
+        args.start,
+        args.end,
+        max_positions=args.max_positions,
+        universe_size=args.universe,
+        commission_rate=args.commission,
+        slippage_bp=args.slippage_bp
+    )
+    
+    # 添加策略配置到结果
+    res['strategy_config'] = strategy.to_dict()
+    
+    # 输出结果
+    print("\n" + "=" * 70)
+    print("回测指标")
+    print("=" * 70)
+    for k, v in res['metrics'].items():
+        if isinstance(v, float):
+            if 'return' in k or 'cagr' in k or 'drawdown' in k:
+                print(f"  {k:<25}: {v:>10.2%}")
+            else:
+                print(f"  {k:<25}: {v:>10.4f}")
+        else:
+            print(f"  {k:<25}: {v}")
+    
+    if res.get('strategy_config'):
+        print("\n" + "=" * 70)
+        print("策略配置")
+        print("=" * 70)
+        import json
+        print(json.dumps(res['strategy_config'], ensure_ascii=False, indent=2, default=str))
+    
+    # 可视化
+    if args.plot:
+        save_path = f"{args.export}/equity.png" if args.export else None
+        plot_equity(res['history'], save_path=save_path)
+    
+    # 导出
+    if args.export:
         import csv
-        out_dir = os.path.join(os.path.dirname(__file__), '..', 'results')
-        os.makedirs(out_dir, exist_ok=True)
-        out_path = os.path.abspath(os.path.join(out_dir, f"b1_filtered_{args.date.replace('-', '')}_{args.strategy}.csv"))
-        with open(out_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(['symbol'])
-            for s in selected:
-                writer.writerow([s])
-        if not args.quiet:
-            print(f"结果已保存到 {out_path}")
+        os.makedirs(args.export, exist_ok=True)
+        res['history'].to_csv(f"{args.export}/history.csv", index=False, encoding='utf-8-sig')
+        res['trades'].to_csv(f"{args.export}/trades.csv", index=False, encoding='utf-8-sig')
+        
+        with open(f"{args.export}/metrics.csv", 'w', newline='', encoding='utf-8-sig') as f:
+            w = csv.writer(f)
+            w.writerow(['metric', 'value'])
+            for k, v in res['metrics'].items():
+                w.writerow([k, v])
+        
+        if res.get('strategy_config'):
+            import json
+            with open(f"{args.export}/strategy_config.json", 'w', encoding='utf-8') as f:
+                json.dump(res['strategy_config'], f, ensure_ascii=False, indent=2, default=str)
+        
+        print(f"\n✓ 导出完成: {args.export}")
+
+
+def cmd_experiments(args: argparse.Namespace):
+    """执行多策略实验命令"""
+    # 加载配置
+    config = {}
+    if hasattr(args, 'config') and args.config:
+        config = load_yaml_config(args.config)
+        args = merge_config_and_args(config, args, 'experiments')
+    
+    # 验证必要参数
+    if not args.start or not args.end or not args.strategies:
+        print("错误: 必须提供 --start, --end 和 --strategies 参数")
+        sys.exit(1)
+    
+    # 解析策略列表
+    strategy_names = [s.strip() for s in args.strategies.split(',') if s.strip()]
+    
+    # 构建每个策略的配置
+    configs = []
+    for strat_name in strategy_names:
+        # 尝试作为预设加载
+        try:
+            preset_config = get_preset_config(strat_name)
+            strategy = build_custom_strategy(
+                selection_name=preset_config['selection'],
+                entry_name=preset_config['entry'],
+                exit_name=preset_config['exit'],
+                execution_name=preset_config['execution'],
+                selection_params=preset_config.get('selection_params'),
+                entry_params=preset_config.get('entry_params'),
+                exit_params=preset_config.get('exit_params'),
+                name=strat_name,
+                validate=True
+            )
+            configs.append({
+                'strategy': strat_name,
+                'strategy_obj': strategy,
+                'universe_size': args.universe,
+                'max_positions': args.max_positions
+            })
+        except ValueError:
+            print(f"警告: 策略 '{strat_name}' 不是预设，跳过")
+            continue
+    
+    if not configs:
+        print("错误: 没有有效的策略配置")
+        sys.exit(1)
+    
+    # 运行实验（这里需要适配engine以支持strategy对象）
+    print(f"\n开始运行 {len(configs)} 个策略实验...")
+    results = []
+    
+    from strategies.composite.registry import STRATEGY_BUILDERS
+    
+    for cfg in configs:
+        print(f"\n运行策略: {cfg['strategy']}")
+        
+        # 临时注册策略
+        temp_name = f"__temp_{cfg['strategy']}__"
+        _strategy = cfg['strategy_obj']
+        STRATEGY_BUILDERS[temp_name] = lambda _s=_strategy, **kwargs: _s
+        
+        engine = BacktestEngine(strategy_name=temp_name, initial_capital=1_000_000)
+        res = engine.run(
+            args.start,
+            args.end,
+            max_positions=cfg['max_positions'],
+            universe_size=cfg['universe_size'],
+            commission_rate=0.0005,
+            slippage_bp=5.0
+        )
+        res['params'] = {'strategy': cfg['strategy']}
+        res['strategy_config'] = cfg['strategy_obj'].to_dict()
+        results.append(res)
+    
+    # 输出摘要
+    print("\n" + "=" * 70)
+    print("实验摘要")
+    print("=" * 70)
+    for r in results:
+        m = r['metrics']
+        strat = r['params']['strategy']
+        print(f"  {strat:<20}: CAGR {m.get('cagr',0):>7.2%} | Sharpe {m.get('sharpe',0):>6.2f} | MDD {m.get('max_drawdown',0):>7.2%}")
+    
+    # 可视化对比
+    if args.plot:
+        save_path = f"{args.export}/equity_compare.png" if args.export else None
+        compare_equity(results, save_path=save_path)
+    
+    # 导出
+    if args.export:
+        os.makedirs(args.export, exist_ok=True)
+        for r in results:
+            strat = r['params']['strategy']
+            r['history'].to_csv(f"{args.export}/history_{strat}.csv", index=False, encoding='utf-8-sig')
+            r['trades'].to_csv(f"{args.export}/trades_{strat}.csv", index=False, encoding='utf-8-sig')
+        print(f"\n✓ 导出完成: {args.export}")
 
 
 def cmd_tests(_args: argparse.Namespace):
-    """统一测试执行：调用 unitest/run_tests.py"""
+    """运行单元测试"""
     import runpy
     run_tests_path = os.path.join(os.path.dirname(__file__), '..', 'unitest', 'run_tests.py')
     run_tests_path = os.path.abspath(run_tests_path)
@@ -103,47 +335,59 @@ def cmd_tests(_args: argparse.Namespace):
     runpy.run_path(run_tests_path, run_name='__main__')
 
 
+def cmd_list_presets(_args: argparse.Namespace):
+    """列出所有可用的预设策略"""
+    presets = list_presets()
+    print("\n可用的预设策略:")
+    print("=" * 70)
+    for name, desc in presets.items():
+        print(f"  {name:<20}: {desc}")
+    print()
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="统一量化框架 CLI")
+    """构建命令行解析器"""
+    parser = argparse.ArgumentParser(
+        description="量化交易框架CLI（重构版） - 统一使用factory构建四层策略",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 使用预设策略回测
+  python -m framework.cli backtest --preset b1_tplus1 --start 2025-01-01 --end 2025-06-30
+  
+  # 使用YAML配置文件
+  python -m framework.cli backtest --config configs/backtest.yaml
+  
+  # YAML + 命令行参数覆盖
+  python -m framework.cli backtest --config configs/base.yaml --initial 2000000
+  
+  # 列出所有预设策略
+  python -m framework.cli list-presets
+  
+  # 多策略实验
+  python -m framework.cli experiments --strategies "b1_tplus1,b1_trailing,b1_advanced" \\
+      --start 2025-01-01 --end 2025-06-30
+        """
+    )
+    
+    parser.add_argument('--config', type=str, help='YAML配置文件路径（可选）')
+    
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # filter 子命令
-    p_filter = sub.add_parser("filter", help="运行 B1 选股筛选")
-    p_filter.add_argument('--date', type=str, required=True, help='查询日期 YYYY-MM-DD')
-    p_filter.add_argument('--stock_count', type=int, default=-1, help='截取股票数，-1 全部')
-    p_filter.add_argument('--strategy', type=str, default='default',
-                          choices=['default', 'b1+', 'volume_surge', 'loose', 'weighted'],
-                          help='B1 变体')
-    p_filter.add_argument('--stock_pool', type=str, default='hs300',
-                          choices=['hs300', 'zz500', 'all_a', 'main', 'custom'], help='股票池')
-    p_filter.add_argument('--symbols_file', type=str, help='自定义股票池文件路径 (配合 custom)')
-    p_filter.add_argument('--no_save', action='store_true', help='不保存结果CSV')
-    p_filter.add_argument('--details', action='store_true', help='打印得分与命中条件')
-    p_filter.add_argument('--plot', action='store_true', help='可视化结果')
-    p_filter.add_argument('--quiet', action='store_true', help='安静模式')
-    p_filter.add_argument('--encoding', type=str, default='utf-8', help='自定义股票池文件编码')
-    p_filter.set_defaults(func=cmd_filter)
-
-    # tests 子命令
-    p_tests = sub.add_parser("tests", help="运行单元测试入口")
-    p_tests.set_defaults(func=cmd_tests)
-
-    # backtest 子命令
+    # ========== backtest 子命令 ==========
     p_bt = sub.add_parser("backtest", help="运行回测")
-    p_bt.add_argument('--start', required=True, type=str, help='开始日期 YYYY-MM-DD')
-    p_bt.add_argument('--end', required=True, type=str, help='结束日期 YYYY-MM-DD')
-    p_bt.add_argument('--strategy', type=str, default='b1', help='策略名称 (b1 / custom)')
-    # 组合层参数（仅当 strategy=custom 或覆盖默认时使用）
+    p_bt.add_argument('--start', type=str, help='开始日期 YYYY-MM-DD')
+    p_bt.add_argument('--end', type=str, help='结束日期 YYYY-MM-DD')
+    
+    # 策略选择：预设 或 自定义
+    p_bt.add_argument('--preset', type=str, help='使用预设策略（优先级最高）')
     p_bt.add_argument('--selection', type=str, help='选股策略名称')
     p_bt.add_argument('--entry', type=str, help='入场策略名称')
-    p_bt.add_argument('--exit', type=str, help='出场策略名称')
-    p_bt.add_argument('--selection-param', action='append', default=[], help='选股层参数 k=v，可多次')
-    p_bt.add_argument('--entry-param', action='append', default=[], help='入场层参数 k=v，可多次')
-    p_bt.add_argument('--exit-param', action='append', default=[], help='出场层参数 k=v，可多次')
+    p_bt.add_argument('--exit', type=str, help='退出策略名称')
+    p_bt.add_argument('--execution', type=str, help='执行模式名称 (close/next_open/tplus1/vwap)')
     p_bt.add_argument('--name', type=str, help='自定义策略名称')
-    p_bt.add_argument('--entry-execution', type=str, help='B1 组合专用：same_close / t+1')
-    p_bt.add_argument('--exit-type', type=str, help='B1 组合专用：fixed/time/trailing/advanced')
-    p_bt.add_argument('--exit-arg', action='append', default=[], help='B1 退出策略参数 k=v (trailing_pct=0.08 等)')
+    
+    # 回测参数
     p_bt.add_argument('--initial', type=float, default=1_000_000, help='初始资金')
     p_bt.add_argument('--max-positions', type=int, default=5, help='最大持仓数')
     p_bt.add_argument('--universe', type=int, default=100, help='股票池规模')
@@ -151,142 +395,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_bt.add_argument('--slippage-bp', type=float, default=5.0, help='滑点 (basis points)')
     p_bt.add_argument('--plot', action='store_true', help='输出资金曲线')
     p_bt.add_argument('--export', nargs='?', const='results/backtest', help='导出目录')
-    def _parse_kv(pairs):
-        out = {}
-        for kv in pairs:
-            if '=' not in kv:
-                continue
-            k, v = kv.split('=', 1)
-            k = k.strip()
-            v = v.strip()
-            # 尝试转换数字
-            try:
-                if v.lower() in {'true','false'}:
-                    v_cast = v.lower() == 'true'
-                elif '.' in v:
-                    v_cast = float(v)
-                    if v_cast.is_integer():
-                        v_cast = int(v_cast)
-                else:
-                    v_cast = int(v)
-                out[k] = v_cast
-                continue
-            except Exception:  # noqa
-                pass
-            out[k] = v
-        return out
+    p_bt.set_defaults(func=cmd_backtest)
 
-    def _build_strategy_from_args(a):
-        if a.strategy == 'custom':
-            sel_params = _parse_kv(a.selection_param)
-            ent_params = _parse_kv(a.entry_param)
-            ex_params = _parse_kv(a.exit_param)
-            return build_custom_strategy(
-                selection_name=a.selection or 'b1',
-                entry_name=a.entry or 'b1',
-                exit_name=a.exit or 'fixed',
-                selection_params=sel_params or None,
-                entry_params=ent_params or None,
-                exit_params=ex_params or None,
-                name=a.name or 'customized_strategy'
-            )
-        # b1 快捷策略（可覆盖 entry_execution / exit_type / exit_args ）
-        strat_params = {}
-        if a.entry_execution:
-            strat_params['entry_execution'] = a.entry_execution
-        if a.exit_type:
-            strat_params['exit_type'] = a.exit_type
-        exit_args = _parse_kv(a.exit_arg)
-        if exit_args:
-            strat_params['exit_args'] = exit_args
-        return get_strategy('b1', params=strat_params if strat_params else None)
-
-    def _run_bt(a):  # noqa: ANN001
-        # 若传递 custom 则直接装配，否则用 BacktestEngine + registry
-        custom_strategy_obj = None
-        if a.strategy == 'custom':
-            custom_strategy_obj = _build_strategy_from_args(a)
-            engine = BacktestEngine(strategy_name='custom', strategy_kwargs={}, initial_capital=a.initial)
-        else:
-            engine = BacktestEngine(strategy_name=a.strategy, initial_capital=a.initial,
-                                    strategy_kwargs=None if a.strategy != 'b1' else None)
-        res = engine.run(a.start, a.end,
-                         max_positions=a.max_positions,
-                         universe_size=a.universe,
-                         commission_rate=a.commission,
-                         slippage_bp=a.slippage_bp)
-        if custom_strategy_obj is not None:
-            # 替换结果中的策略配置为自定义对象的 config
-            res['strategy_config'] = getattr(custom_strategy_obj, 'to_dict', lambda: {})()
-        print("回测指标:")
-        print("回测指标:")
-        for k, v in res['metrics'].items():
-            if isinstance(v, float):
-                if 'return' in k or 'cagr' in k or 'drawdown' in k:
-                    print(f"  {k}: {v:.2%}")
-                else:
-                    print(f"  {k}: {v:.4f}")
-            else:
-                print(f"  {k}: {v}")
-        if 'strategy_config' in res:
-            print("策略配置:")
-            import json
-            print(json.dumps(res['strategy_config'], ensure_ascii=False, indent=2, default=str))
-        if a.plot:
-            plot_equity(res['history'], save_path=(f"{a.export}/equity.png" if a.export else None))
-        if a.export:
-            import csv
-            os.makedirs(a.export, exist_ok=True)
-            res['history'].to_csv(f"{a.export}/history.csv", index=False, encoding='utf-8-sig')
-            res['trades'].to_csv(f"{a.export}/trades.csv", index=False, encoding='utf-8-sig')
-            with open(f"{a.export}/metrics.csv", 'w', newline='', encoding='utf-8-sig') as f:
-                w = csv.writer(f)
-                w.writerow(['metric', 'value'])
-                for k, v in res['metrics'].items():
-                    w.writerow([k, v])
-            if 'strategy_config' in res:
-                import json
-                with open(f"{a.export}/strategy_config.json", 'w', encoding='utf-8') as f:
-                    json.dump(res['strategy_config'], f, ensure_ascii=False, indent=2, default=str)
-            print(f"导出完成: {a.export}")
-    p_bt.set_defaults(func=_run_bt)
-
-    # experiments 子命令
+    # ========== experiments 子命令 ==========
     p_exp = sub.add_parser("experiments", help="并行多策略实验")
-    p_exp.add_argument('--start', required=True)
-    p_exp.add_argument('--end', required=True)
-    p_exp.add_argument('--strategies', required=True, help='逗号分隔策略名列表')
+    p_exp.add_argument('--start', type=str, help='开始日期')
+    p_exp.add_argument('--end', type=str, help='结束日期')
+    p_exp.add_argument('--strategies', type=str, help='逗号分隔的预设策略名列表')
     p_exp.add_argument('--universe', type=int, default=100)
     p_exp.add_argument('--max-positions', type=int, default=5)
     p_exp.add_argument('--plot', action='store_true')
     p_exp.add_argument('--export', nargs='?', const='results/experiments')
-    def _run_exp(a):  # noqa: ANN001
-        configs = []
-        for s in [x.strip() for x in a.strategies.split(',') if x.strip()]:
-            configs.append({'strategy': s, 'universe_size': a.universe, 'max_positions': a.max_positions})
-        res_list = run_parallel_experiments(configs, a.start, a.end)
-        print("实验摘要:")
-        for r in res_list:
-            m = r['metrics']
-            print(f"  {r['params']['strategy']}: CAGR {m.get('cagr',0):.2%} Sharpe {m.get('sharpe',0):.2f} MDD {m.get('max_drawdown',0):.2%}")
-        if a.plot:
-            compare_equity(res_list, save_path=(f"{a.export}/equity_compare.png" if a.export else None))
-        if a.export:
-            os.makedirs(a.export, exist_ok=True)
-            for r in res_list:
-                strat = r['params']['strategy']
-                r['history'].to_csv(f"{a.export}/history_{strat}.csv", index=False, encoding='utf-8-sig')
-                r['trades'].to_csv(f"{a.export}/trades_{strat}.csv", index=False, encoding='utf-8-sig')
-    p_exp.set_defaults(func=_run_exp)
+    p_exp.set_defaults(func=cmd_experiments)
+
+    # ========== tests 子命令 ==========
+    p_tests = sub.add_parser("tests", help="运行单元测试")
+    p_tests.set_defaults(func=cmd_tests)
+
+    # ========== list-presets 子命令 ==========
+    p_list = sub.add_parser("list-presets", help="列出所有可用的预设策略")
+    p_list.set_defaults(func=cmd_list_presets)
 
     return parser
 
 
-def main(argv: Optional[list[str]] = None):  # pragma: no cover - CLI 入口
+def main(argv: Optional[list[str]] = None):
+    """CLI 主入口"""
     parser = build_parser()
     args = parser.parse_args(argv)
     args.func(args)
 
 
-if __name__ == '__main__':  # pragma: no cover
+if __name__ == '__main__':
     main()

@@ -135,12 +135,16 @@ class MarketDataHandler:
         original_http_proxy = os.environ.get('HTTP_PROXY', '')
         original_https_proxy = os.environ.get('HTTPS_PROXY', '')
 
+        import time
         try:
             # 临时禁用代理
             os.environ['HTTP_PROXY'] = ''
             os.environ['HTTPS_PROXY'] = ''
             os.environ['http_proxy'] = ''
             os.environ['https_proxy'] = ''
+
+            # 降低akshare请求频率，防止被封
+            time.sleep(1)
 
             # 使用akshare获取数据
             # 转换日期格式
@@ -214,12 +218,16 @@ class MarketDataHandler:
         original_http_proxy = os.environ.get('HTTP_PROXY', '')
         original_https_proxy = os.environ.get('HTTPS_PROXY', '')
 
+        import time
         try:
             # 临时禁用代理
             os.environ['HTTP_PROXY'] = ''
             os.environ['HTTPS_PROXY'] = ''
             os.environ['http_proxy'] = ''
             os.environ['https_proxy'] = ''
+
+            # 降低akshare请求频率，防止被封
+            time.sleep(1)
 
             # 转换日期格式
             start_date_fmt = pd.to_datetime(start_date).strftime('%Y%m%d')

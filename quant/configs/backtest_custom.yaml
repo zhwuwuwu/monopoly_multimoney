@@ -1,0 +1,45 @@
+# 自定义四层策略配置示例
+
+backtest:
+  # 时间范围
+  start: "2025-01-01"
+  end: "2025-06-30"
+  
+  # 四层策略配置（必须完整）
+  strategy:
+    name: "my_custom_strategy"
+    
+    # 选股层
+    selection: "b1"
+    selection_params:
+      j_threshold: -8
+      big_positive_pct: 0.055
+      ma_window: 20
+    
+    # 入场层
+    entry: "b1"
+    entry_params:
+      take_profit_pct: 0.25
+      stop_loss_pct: 0.10
+    
+    # 退出层
+    exit: "trailing"
+    exit_params:
+      trailing_pct: 0.08
+    
+    # 执行层
+    execution: "next_open"  # close / next_open / tplus1 / vwap
+  
+  # 回测参数
+  initial: 2000000
+  max_positions: 8
+  universe: 100
+  commission: 0.0003
+  slippage_bp: 3.0
+  
+  # 输出设置
+  plot: true
+  export: "results/custom_advanced"
+
+# 使用方式：
+# python -m framework.cli backtest --config configs/backtest_custom.yaml

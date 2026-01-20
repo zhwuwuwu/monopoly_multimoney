@@ -11,7 +11,7 @@ frozendict==2.4.6
 idna==3.10
 joblib==1.5.1
 kiwisolver==1.4.8
-matplotlib==3.10.3
+matplotlib==3.10.8
 multitasking==0.0.12
 numpy==2.3.2
 packaging==25.0
@@ -26,8 +26,8 @@ pyparsing==3.2.3
 python-dateutil==2.9.0.post0
 pytz==2025.2
 requests==2.32.4
-scikit-learn==1.7.1
-scipy==1.16.0
+scikit-learn==1.8.0
+scipy==1.17.0
 six==1.17.0
 soupsieve==2.7
 statsmodels==0.14.5
@@ -37,3 +37,5 @@ tzdata==2025.2
 urllib3==2.5.0
 websockets==15.0.1
 yfinance==0.2.65
+PyYAML>=6.0.1
+akshare>=1.18.19

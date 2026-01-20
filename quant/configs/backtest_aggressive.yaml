@@ -1,0 +1,33 @@
+# 激进策略回测配置
+
+backtest:
+  start: "2025-01-01"
+  end: "2025-06-30"
+  
+  strategy:
+    name: "aggressive_short_term"
+    selection: "b1"
+    selection_params:
+      j_threshold: -5      # 放宽的超卖条件
+      big_positive_pct: 0.04
+      ma_window: 10        # 较短的均线周期
+    
+    entry: "b1"
+    entry_params:
+      take_profit_pct: 0.35
+      stop_loss_pct: 0.15
+    
+    exit: "trailing"
+    exit_params:
+      trailing_pct: 0.12   # 较宽的追踪止损
+    
+    execution: "close"     # 当日收盘执行
+  
+  initial: 1000000
+  max_positions: 10        # 较多的持仓
+  universe: 150            # 较大的股票池
+  commission: 0.0005
+  slippage_bp: 5.0
+  
+  plot: true
+  export: "results/aggressive_strategy"

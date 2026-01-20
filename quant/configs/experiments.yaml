@@ -1,0 +1,20 @@
+# 多策略对比实验配置
+
+experiments:
+  # 时间范围
+  start: "2025-01-01"
+  end: "2025-06-30"
+  
+  # 预设策略列表（逗号分隔）
+  strategies: "default,b1_tplus1,b1_trailing,b1_advanced,b1_aggressive,b1_conservative"
+  
+  # 实验参数
+  universe: 80
+  max_positions: 5
+  
+  # 输出设置
+  plot: true
+  export: "results/experiments_compare"
+
+# 使用方式：
+# python -m framework.cli experiments --config configs/experiments.yaml

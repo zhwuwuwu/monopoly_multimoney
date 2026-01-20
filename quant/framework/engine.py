@@ -19,8 +19,14 @@ class BacktestEngine:
 
     def run(self, start_date: str, end_date: str, **bt_kwargs):  # pragma: no cover
         strategy = self.build_strategy()
-        bt = Backtester(self.data_handler, strategy, initial_capital=self.initial_capital, **bt_kwargs)
-        raw = bt.run(start_date, end_date, universe_size=bt_kwargs.get('universe_size', 100))
+        
+        # 分离 Backtester.__init__ 参数和 run 参数
+        init_params = ['max_positions', 'commission_rate', 'slippage_bp', 'lookback_days']
+        init_kwargs = {k: v for k, v in bt_kwargs.items() if k in init_params}
+        run_kwargs = {k: v for k, v in bt_kwargs.items() if k not in init_params}
+        
+        bt = Backtester(self.data_handler, strategy, initial_capital=self.initial_capital, **init_kwargs)
+        raw = bt.run(start_date, end_date, **run_kwargs)
         import pandas as pd
         history_df = pd.DataFrame(raw['history'])
         trades_df = pd.DataFrame(raw['trades']) if raw['trades'] else pd.DataFrame(columns=['date'])
