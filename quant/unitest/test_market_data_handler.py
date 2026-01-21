@@ -147,8 +147,37 @@ class TestMarketDataHandler(unittest.TestCase):
             print("返回了None，符合预期")
         else:
             print(f"返回了DataFrame，包含 {len(df)} 条数据")
+            
+    def test_connection_workflow(self):
+        """测试完整连接流程：获取HS300 -> 获取首支股票行情"""
+        print('\n' + '='*10 + "测试完整连接流程 (Smoke Test)..." + '='*10)
+        
+        # 1. 获取沪深300列表
+        print("步骤1: 获取沪深300成分股列表...")
+        try:
+            components = self.handler.get_hs300_components()
+        except Exception as e:
+            self.fail(f"获取成分股列表失败: {e}")
+            
+        self.assertIsNotNone(components)
+        self.assertGreater(len(components), 0)
+        print(f"成功获取 {len(components)} 只成分股")
+        
+        # 2. 获取第一只股票的数据
+        first_stock = components[0]
+        print(f"\n步骤2: 获取第一只股票 ({first_stock}) 的详细行情...")
+        try:
+            df = self.handler.get_stock_data(first_stock, self.start_date, self.end_date)
+        except Exception as e:
+            self.fail(f"获取股票数据失败: {e}")
+            
+        self.assertIsNotNone(df)
+        self.assertFalse(df.empty)
+        print("获取数据成功！前5行数据：")
+        print(df.head())
+        print("\n连接测试全部通过！外部数据源工作正常。")
 
 
 if __name__ == '__main__':
     print("开始测试MarketDataHandler类...")
-    unittest.main(defaultTest='TestMarketDataHandler.test_calculate_kdj')
+    unittest.main(defaultTest='TestMarketDataHandler')
