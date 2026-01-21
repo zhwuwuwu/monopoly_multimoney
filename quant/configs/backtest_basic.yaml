@@ -1,0 +1,20 @@
+# 基础回测配置示例 - 使用预设策略
+
+backtest:
+  # 时间范围
+  start: "2025-01-01"
+  end: "2025-06-30"
+  
+  # 回测参数
+  initial: 1000000
+  max_positions: 5
+  universe: 80
+  commission: 0.0005
+  slippage_bp: 5.0
+  
+  # 输出设置
+  plot: true
+  export: "results/backtest_b1_basic"
+
+# 使用方式：
+# python -m framework.cli backtest --config configs/backtest_basic.yaml --preset b1_tplus1

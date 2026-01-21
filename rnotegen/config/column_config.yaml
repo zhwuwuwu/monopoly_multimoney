@@ -1,0 +1,60 @@
+# Column Configuration
+# Configure column themes and topics
+
+columns:
+  default_column:
+    name: "深度观察"
+    description: "用理性的眼光观察世界，用独立的思维分析现象"
+    
+    # Main themes and topics
+    themes:
+      social_trends:
+        name: "社会趋势"
+        description: "分析当前社会现象和发展趋势"
+        keywords: ["社会现象", "趋势分析", "人文观察"]
+        
+      business_insights:
+        name: "商业洞察"
+        description: "解读商业世界的变化和机会"
+        keywords: ["商业分析", "市场趋势", "企业案例"]
+        
+      tech_commentary:
+        name: "科技评论"
+        description: "探讨科技发展对社会的影响"
+        keywords: ["科技趋势", "创新分析", "数字化转型"]
+        
+      historical_perspective:
+        name: "历史视角"
+        description: "从历史中寻找现实的启示"
+        keywords: ["历史分析", "文化传承", "经验教训"]
+    
+    # Content framework
+    content_framework:
+      structure:
+        - "引子：抛出问题或现象"
+        - "分析：多角度深入探讨"
+        - "例证：用具体事例支撑观点"
+        - "思考：提供独到见解"
+        - "结语：总结并引发思考"
+      
+      requirements:
+        - "必须基于事实和可靠来源"
+        - "体现作者独特的视角和立场"
+        - "内容要有深度但易于理解"
+        - "适合小红书平台的阅读习惯"
+        - "鼓励读者互动和讨论"
+    
+    # Platform specific settings
+    platform_settings:
+      xiaohongshu:
+        max_length: 2000
+        hashtag_count: 5-8
+        image_required: true
+        engagement_style: "提问式结尾"
+        
+    # Research requirements
+    research:
+      fact_checking: true
+      source_verification: true
+      multiple_perspectives: true
+      latest_information: true
